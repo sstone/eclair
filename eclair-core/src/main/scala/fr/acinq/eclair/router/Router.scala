@@ -29,7 +29,7 @@ import fr.acinq.eclair.blockchain._
 import fr.acinq.eclair.channel._
 import fr.acinq.eclair.crypto.TransportHandler
 import fr.acinq.eclair.io.Peer
-import fr.acinq.eclair.io.Peer.PeerRoutingMessage
+import fr.acinq.eclair.io.Peer.{FundingTxAlreadySpent, PeerRoutingMessage}
 import fr.acinq.eclair.payment.PaymentRequest.ExtraHop
 import fr.acinq.eclair.transactions.Scripts
 import fr.acinq.eclair.wire._
@@ -238,8 +238,11 @@ class Router(nodeParams: NodeParams, watcher: ActorRef) extends FSMDiagnosticAct
             true
           }
         case ValidateResult(c, Some(tx), false, None) =>
-          // TODO: vulnerability if they flood us with spent funding tx?
-          log.warning("ignoring shortChannelId={} tx={} (funding tx not found in utxo)", c.shortChannelId, tx.txid)
+          log.warning("ignoring shortChannelId={} tx={} (funding tx already spent)", c.shortChannelId, tx.txid)
+          d0.awaiting.get(c) match {
+            case Some(origins) => origins.foreach(_ ! FundingTxAlreadySpent(c))
+            case _ => ()
+          }
           // there may be a record if we have just restarted
           db.removeChannel(c.shortChannelId)
           false
