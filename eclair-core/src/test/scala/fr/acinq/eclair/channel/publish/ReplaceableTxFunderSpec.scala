@@ -39,10 +39,10 @@ class ReplaceableTxFunderSpec extends TestKitBaseClass with AnyFunSuiteLike {
 
   private def createAnchorTx(): (CommitTx, ClaimLocalAnchorOutputTx) = {
     val anchorScript = Scripts.anchor(PlaceHolderPubKey)
-    val commitInput = Funding.makeFundingInputInfo(randomTxId(), 1, 500 sat, PlaceHolderPubKey, PlaceHolderPubKey)
+    val commitInput = Funding.makeFundingInputInfo(randomTxId(), 1, 500 sat, PlaceHolderPubKey, PlaceHolderPubKey, DefaultCommitmentFormat)
     val commitTx = Transaction(
       2,
-      Seq(TxIn(commitInput.outPoint, commitInput.redeemScript, 0, Scripts.witness2of2(PlaceHolderSig, PlaceHolderSig, PlaceHolderPubKey, PlaceHolderPubKey))),
+      Seq(TxIn(commitInput.outPoint, commitInput.redeemScriptOrEmptyScript, 0, Scripts.witness2of2(PlaceHolderSig, PlaceHolderSig, PlaceHolderPubKey, PlaceHolderPubKey))),
       Seq(TxOut(330 sat, Script.pay2wsh(anchorScript))),
       0
     )
@@ -146,7 +146,7 @@ class ReplaceableTxFunderSpec extends TestKitBaseClass with AnyFunSuiteLike {
     localParams.dustLimit.returns(1000 sat)
     commitment.localParams.returns(localParams)
     val localCommit = mock[LocalCommit]
-    localCommit.commitTxAndRemoteSig.returns(CommitTxAndRemoteSig(commitTx, PlaceHolderSig))
+    localCommit.commitTxAndRemoteSig.returns(CommitTxAndRemoteSig(commitTx, Left(PlaceHolderSig)))
     commitment.localCommit.returns(localCommit)
 
     // We can handle a small feerate update by lowering the change output.
