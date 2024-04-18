@@ -1003,7 +1003,8 @@ class Channel(val nodeParams: NodeParams, val wallet: OnChainChannelFunder with 
                   purpose = InteractiveTxBuilder.SpliceTx(parentCommitment, d.commitments.changes),
                   localPushAmount = spliceAck.pushAmount, remotePushAmount = msg.pushAmount,
                   liquidityPurchase_opt = willFund_opt.map(_.purchase),
-                  wallet
+                  wallet,
+                  None // TODO
                 ))
                 txBuilder ! InteractiveTxBuilder.Start(self)
                 stay() using d.copy(spliceStatus = SpliceStatus.SpliceInProgress(cmd_opt = None, sessionId, txBuilder, remoteCommitSig = None)) sending spliceAck
@@ -1053,7 +1054,8 @@ class Channel(val nodeParams: NodeParams, val wallet: OnChainChannelFunder with 
                 purpose = InteractiveTxBuilder.SpliceTx(parentCommitment, d.commitments.changes),
                 localPushAmount = cmd.pushAmount, remotePushAmount = msg.pushAmount,
                 liquidityPurchase_opt = liquidityPurchase_opt,
-                wallet
+                wallet,
+                None // TODO
               ))
               txBuilder ! InteractiveTxBuilder.Start(self)
               stay() using d.copy(spliceStatus = SpliceStatus.SpliceInProgress(cmd_opt = Some(cmd), sessionId, txBuilder, remoteCommitSig = None))
@@ -1966,7 +1968,7 @@ class Channel(val nodeParams: NodeParams, val wallet: OnChainChannelFunder with 
       }
       val myNextLocalNonce = d.commitments.params.commitmentFormat match {
         case SimpleTaprootChannelsStagingCommitmentFormat =>
-          val (_, publicNonce) = keyManager.verificationNonce(d.commitments.params.localParams.fundingKeyPath, d.commitments.latest.fundingTxIndex, channelKeyPath, d.commitments.localCommitIndex)
+          val (_, publicNonce) = keyManager.verificationNonce(d.commitments.params.localParams.fundingKeyPath, d.commitments.latest.fundingTxIndex, channelKeyPath, d.commitments.localCommitIndex + 1)
           Set(NextLocalNonceTlv(publicNonce))
         case _ => Set.empty
       }
