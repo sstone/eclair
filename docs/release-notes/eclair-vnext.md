@@ -6,6 +6,10 @@
 
 <insert changes>
 
+### Eclair requires a  Java 21 runtime
+
+Eclair now targets Java 21 and requires a compatible Java Runtime Environment. It will no longer work on JRE 11 or JRE 17.
+
 ### API changes
 
 <insert changes>
