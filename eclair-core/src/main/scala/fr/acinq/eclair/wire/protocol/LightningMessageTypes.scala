@@ -216,6 +216,8 @@ case class ChannelReestablish(channelId: ByteVector32,
   val spliceNonces: List[IndividualNonce] = tlvStream.get[ChannelReestablishTlv.SpliceNoncesTlv].map(_.nonces).getOrElse(List.empty)
   val firstSpliceNonce: Option[IndividualNonce] = if (spliceNonces.isEmpty) None else Some(spliceNonces(0))
   val secondSpliceNonce: Option[IndividualNonce] = if (spliceNonces.isEmpty) None else Some(spliceNonces(1))
+  val nonceMap: Map[TxId, IndividualNonce] = tlvStream.get[ChannelReestablishTlv.NonceMapTlv].map(_.nonces.toMap).getOrElse(Map.empty[TxId, IndividualNonce])
+
 }
 
 case class OpenChannel(chainHash: BlockHash,

@@ -55,6 +55,7 @@ import fr.acinq.eclair.wire.protocol.ChannelTlv.NextLocalNoncesTlv
 import fr.acinq.eclair.wire.protocol._
 
 import scala.collection.immutable.Queue
+import scala.collection.mutable
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
 import scala.util.Random
@@ -208,6 +209,8 @@ class Channel(val nodeParams: NodeParams, val wallet: OnChainChannelFunder with 
 
   // // will be added to remoteNextLocalNonces once a splice has been completed
   var pendingRemoteNextLocalNonce: Option[IndividualNonce] = None
+
+  var remoteNonceMap: Map[TxId, IndividualNonce] = Map.empty[TxId, IndividualNonce]
 
   def setRemoteNextLocalNonces(info: String, n: List[IndividualNonce]): Unit = {
     this.remoteNextLocalNonces = n
@@ -559,6 +562,10 @@ class Channel(val nodeParams: NodeParams, val wallet: OnChainChannelFunder with 
           log.debug("ignoring CMD_SIGN (nothing to sign)")
           stay()
         case Right(_) =>
+          val works = this.remoteNextLocalNonces
+          val toCheck = d.commitments.active.map(c => this.remoteNonceMap.get(c.fundingTxId))
+          println(s"works = $works")
+          println(s"check = $toCheck")
           d.commitments.sendCommit(keyManager, this.remoteNextLocalNonces) match {
             case Right((commitments1, commit)) =>
               log.debug("sending a new sig, spec:\n{}", commitments1.latest.specs2String)
@@ -2263,10 +2270,13 @@ class Channel(val nodeParams: NodeParams, val wallet: OnChainChannelFunder with 
         case _ => Set.empty
       }
       // for taproot channels, send a "next remote nonce" for each active commitment
+      val nonceMap = mutable.HashMap.empty[TxId, IndividualNonce]
       val myNextLocalNonces = if (d.commitments.params.commitmentFormat.useTaproot) {
         val nonces = d.commitments.active.map(c => {
           val localFundingPubKey = nodeParams.channelKeyManager.fundingPublicKey(d.commitments.params.localParams.fundingKeyPath, c.fundingTxIndex).publicKey
-          keyManager.verificationNonce(localFundingPubKey, d.commitments.localCommitIndex + 1)._2
+          val nonce = keyManager.verificationNonce(localFundingPubKey, d.commitments.localCommitIndex + 1)._2
+          nonceMap.put(c.fundingTxId, nonce)
+          nonce
         })
         Set(NextLocalNoncesTlv(nonces.toList))
       } else {
@@ -2283,6 +2293,7 @@ class Channel(val nodeParams: NodeParams, val wallet: OnChainChannelFunder with 
               keyManager.verificationNonce(localFundingPubKey, w.signingSession.localCommitIndex)._2,
               keyManager.verificationNonce(localFundingPubKey, w.signingSession.localCommitIndex + 1)._2,
             )
+            nonceMap.put(w.signingSession.fundingTx.txId, spliceNonces(1))
             Set(ChannelReestablishTlv.SpliceNoncesTlv(spliceNonces))
           case _ =>
             val localFundingPubKey = nodeParams.channelKeyManager.fundingPublicKey(d.commitments.params.localParams.fundingKeyPath, d.commitments.latest.fundingTxIndex).publicKey
@@ -2290,6 +2301,7 @@ class Channel(val nodeParams: NodeParams, val wallet: OnChainChannelFunder with 
               keyManager.verificationNonce(localFundingPubKey, d.commitments.localCommitIndex)._2,
               keyManager.verificationNonce(localFundingPubKey, d.commitments.localCommitIndex + 1)._2,
             )
+            nonceMap.put(d.commitments.latest.fundingTxId, spliceNonces(1))
             Set(ChannelReestablishTlv.SpliceNoncesTlv(spliceNonces))
         }
         case _ => Set.empty
@@ -2301,7 +2313,7 @@ class Channel(val nodeParams: NodeParams, val wallet: OnChainChannelFunder with 
         nextRemoteRevocationNumber = d.commitments.remoteCommitIndex,
         yourLastPerCommitmentSecret = PrivateKey(yourLastPerCommitmentSecret),
         myCurrentPerCommitmentPoint = myCurrentPerCommitmentPoint,
-        tlvStream = TlvStream(rbfTlv ++ myNextLocalNonces ++ mySpliceNonces)
+        tlvStream = TlvStream(rbfTlv ++ myNextLocalNonces ++ mySpliceNonces ++ Set(ChannelReestablishTlv.NonceMapTlv(nonceMap.toList)))
       )
       // we update local/remote connection-local global/local features, we don't persist it right now
       val d1 = Helpers.updateFeatures(d, localInit, remoteInit)
@@ -2405,6 +2417,7 @@ class Channel(val nodeParams: NodeParams, val wallet: OnChainChannelFunder with 
 
     case Event(channelReestablish: ChannelReestablish, d: DATA_NORMAL) =>
       log.debug(s"received $channelReestablish")
+      this.remoteNonceMap = channelReestablish.nonceMap
       if (d.commitments.params.commitmentFormat.useTaproot) {
         d.spliceStatus match {
           case _: SpliceStatus.SpliceWaitingForSigs if channelReestablish.nextLocalNonces.size == d.commitments.active.size =>
@@ -2457,14 +2470,7 @@ class Channel(val nodeParams: NodeParams, val wallet: OnChainChannelFunder with 
                   // We retransmit our commit_sig, and will send our tx_signatures once we've received their commit_sig.
                   log.info("re-sending commit_sig for splice attempt with fundingTxIndex={} fundingTxId={}", signingSession.fundingTxIndex, signingSession.fundingTx.txId)
                   // channel_reestablishes includes splice nonces for nextLocalCommitmentNumber - 1 and nextLocalCommitmentNumber
-                  val spliceNonce = if (signingSession.remoteCommit.index == channelReestablish.nextLocalCommitmentNumber) {
-                    channelReestablish.firstSpliceNonce
-                  } else if (signingSession.remoteCommit.index == channelReestablish.nextLocalCommitmentNumber - 1) {
-                    channelReestablish.firstSpliceNonce
-                  } else {
-                    // we should never end up here, it would have been handled in checkSync()
-                    throw new RuntimeException("invalid nextLocalCommitmentNumber in ChannelReestablish")
-                  }
+                  val spliceNonce = channelReestablish.firstSpliceNonce
                   val commitSig = signingSession.remoteCommit.sign(keyManager, d.commitments.params, signingSession.fundingTxIndex, signingSession.fundingParams.remoteFundingPubKey, signingSession.commitInput, spliceNonce)
                   sendQueue = sendQueue :+ commitSig
                   d.spliceStatus
