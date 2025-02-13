@@ -123,6 +123,10 @@ class SqliteChannelsDb(val sqlite: Connection) extends ChannelsDb with Logging {
   }
 
   override def addOrUpdateChannel(data: PersistentChannelData): Unit = withMetrics("channels/add-or-update-channel", DbBackends.Sqlite) {
+    val foo = channelDataCodec.encode(data)
+    if (foo.isFailure) {
+      println(foo)
+    }
     val encoded = channelDataCodec.encode(data).require.toByteArray
     using(sqlite.prepareStatement("UPDATE local_channels SET data=? WHERE channel_id=?")) { update =>
       update.setBytes(1, encoded)

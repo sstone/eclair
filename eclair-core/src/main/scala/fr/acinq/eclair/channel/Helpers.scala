@@ -168,7 +168,6 @@ object Helpers {
     if (open.dustLimit > nodeParams.channelConf.maxRemoteDustLimit) return Left(DustLimitTooLarge(open.temporaryChannelId, open.dustLimit, nodeParams.channelConf.maxRemoteDustLimit))
 
     val channelFeatures = ChannelFeatures(channelType, localFeatures, remoteFeatures, open.channelFlags.announceChannel)
-    if ((channelFeatures.hasFeature(Features.SimpleTaproot) || channelFeatures.hasFeature(Features.SimpleTaprootStaging)) && open.tlvStream.get[ChannelTlv.NextLocalNoncesTlv].isEmpty) return Left(MissingNextLocalNonce(open.temporaryChannelId))
 
     // BOLT #2: The receiving node MUST fail the channel if: it considers feerate_per_kw too small for timely processing or unreasonably large.
     val localFeeratePerKw = nodeParams.onChainFeeConf.getCommitmentFeerate(nodeParams.currentBitcoinCoreFeerates, remoteNodeId, channelFeatures.commitmentFormat, open.fundingAmount)
@@ -268,7 +267,6 @@ object Helpers {
       liquidityPurchase_opt <- LiquidityAds.validateRemoteFunding(open.requestFunding_opt, remoteNodeId, accept.temporaryChannelId, fundingScript, accept.fundingAmount, open.fundingFeerate, isChannelCreation = true, accept.willFund_opt)
     } yield {
       val channelFeatures = ChannelFeatures(channelType, localFeatures, remoteFeatures, open.channelFlags.announceChannel)
-      if ((channelFeatures.hasFeature(Features.SimpleTaproot) || channelFeatures.hasFeature(Features.SimpleTaprootStaging)) && accept.tlvStream.get[ChannelTlv.NextLocalNoncesTlv].isEmpty) return Left(MissingNextLocalNonce(open.temporaryChannelId))
       (channelFeatures, script_opt, liquidityPurchase_opt)
     }
   }
@@ -529,7 +527,10 @@ object Helpers {
         val localPerCommitmentSecret = keyManager.commitmentSecret(channelKeyPath, commitments.localCommitIndex - 1)
         val localNextPerCommitmentPoint = keyManager.commitmentPoint(channelKeyPath, commitments.localCommitIndex + 1)
         val tlvStream: TlvStream[RevokeAndAckTlv] = if (commitments.params.commitmentFormat.useTaproot) {
-          val nonces = commitments.active.map(c => keyManager.verificationNonce(commitments.params.localParams.fundingKeyPath, c.fundingTxIndex, channelKeyPath, commitments.localCommitIndex + 1))
+          val nonces = commitments.active.map(c => {
+            val fundingPubkey = keyManager.fundingPublicKey(commitments.params.localParams.fundingKeyPath, c.fundingTxIndex).publicKey
+            keyManager.verificationNonce(fundingPubkey, commitments.localCommitIndex + 1)
+          })
           TlvStream(RevokeAndAckTlv.NextLocalNoncesTlv(nonces.map(_._2).toList))
         } else {
           TlvStream.empty
@@ -725,23 +726,21 @@ object Helpers {
         val (closingTx, closingSigned) = makeClosingTx(keyManager, commitment, localScriptPubkey, remoteScriptPubkey, ClosingFees(remoteClosingFee, remoteClosingFee, remoteClosingFee), Some(localClosingNonce), Some(remoteClosingNonce))
         if (checkClosingDustAmounts(closingTx)) {
           log.info("using closing nonce = {} remote closing nonce = {}", localClosingNonce, remoteClosingNonce)
-          val Right(localClosingPartialSig) = keyManager.partialSign(
-            closingTx,
-            keyManager.fundingPublicKey(commitment.localParams.fundingKeyPath, commitment.fundingTxIndex), commitment.remoteFundingPubKey,
-            TxOwner.Local,
-            localClosingNonce, remoteClosingNonce,
-          )
           val fundingPubKey = keyManager.fundingPublicKey(commitment.localParams.fundingKeyPath, commitment.fundingTxIndex)
-          val Right(aggSig) = Musig2.aggregateTaprootSignatures(
-            Seq(localClosingPartialSig, remoteClosingPartialSig), closingTx.tx, closingTx.tx.txIn.indexWhere(_.outPoint == closingTx.input.outPoint),
-            Seq(closingTx.input.txOut),
-            Scripts.sort(Seq(fundingPubKey.publicKey, commitment.remoteFundingPubKey)),
-            Seq(localClosingNonce._2, remoteClosingNonce),
-            None)
-          val signedClosingTx = Transactions.addAggregatedSignature(closingTx, aggSig)
-          Transactions.checkSpendable(signedClosingTx) match {
-            case Success(_) => Right(signedClosingTx, closingSigned)
-            case _ => Left(InvalidCloseSignature(commitment.channelId, signedClosingTx.tx.txid))
+
+          (for {
+            localClosingPartialSig <- keyManager.partialSign(closingTx, fundingPubKey, commitment.remoteFundingPubKey, TxOwner.Local, localClosingNonce, remoteClosingNonce)
+            inputIndex = closingTx.tx.txIn.indexWhere(_.outPoint == closingTx.input.outPoint)
+            aggSig <- Musig2.aggregateTaprootSignatures(
+              Seq(localClosingPartialSig, remoteClosingPartialSig),
+              closingTx.tx, inputIndex, Seq(closingTx.input.txOut),
+              Scripts.sort(Seq(fundingPubKey.publicKey, commitment.remoteFundingPubKey)),
+              Seq(localClosingNonce._2, remoteClosingNonce),
+              None)
+            signedClosingTx = Transactions.addAggregatedSignature(closingTx, aggSig)
+          } yield signedClosingTx) match {
+            case Right(signedClosingTx) if Transactions.checkSpendable(signedClosingTx).isSuccess => Right(signedClosingTx, closingSigned)
+            case _ => Left(InvalidCloseSignature(commitment.channelId, closingTx.tx.txid))
           }
         } else {
           Left(InvalidCloseAmountBelowDust(commitment.channelId, closingTx.tx.txid))
