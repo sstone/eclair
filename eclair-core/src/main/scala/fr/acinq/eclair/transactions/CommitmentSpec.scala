@@ -16,7 +16,9 @@
 
 package fr.acinq.eclair.transactions
 
-import fr.acinq.bitcoin.scalacompat.{LexicographicalOrdering, OP_CHECKSIG, OP_DUP, OP_EQUALVERIFY, OP_HASH160, OP_PUSHDATA, Satoshi, SatoshiLong, Script, ScriptElt, TxOut}
+import fr.acinq.bitcoin.ScriptTree
+import fr.acinq.bitcoin.scalacompat.Crypto.XonlyPublicKey
+import fr.acinq.bitcoin.scalacompat.{ByteVector32, LexicographicalOrdering, OP_CHECKSIG, OP_DUP, OP_EQUALVERIFY, OP_HASH160, OP_PUSHDATA, Satoshi, SatoshiLong, Script, ScriptElt, TxOut}
 import fr.acinq.eclair.MilliSatoshi
 import fr.acinq.eclair.blockchain.fee.FeeratePerKw
 import fr.acinq.eclair.transactions.Transactions.{CommitmentFormat, ZeroFeeHtlcTxAnchorOutputsCommitmentFormat}
@@ -26,26 +28,60 @@ import fr.acinq.eclair.wire.protocol._
  * Created by PM on 07/12/2016.
  */
 
+sealed trait RedeemInfo {
+  def publicKeyScript: Seq[ScriptElt]
+}
+
+/** Inputs that use either segwit v0 or a taproot key path. */
+sealed trait TaprootKeyPathOrSegwitV0 extends RedeemInfo
+
+/** Inputs that use either segwit v0 or a taproot script path. */
+sealed trait TaprootScriptPathOrSegwitV0 extends RedeemInfo
+
+object RedeemInfo {
+  case class SegwitV0(redeemScript: Seq[ScriptElt]) extends TaprootKeyPathOrSegwitV0 with TaprootScriptPathOrSegwitV0 {
+    override def publicKeyScript: Seq[ScriptElt] = redeemScript match {
+      case OP_DUP :: OP_HASH160 :: OP_PUSHDATA(data, _) :: OP_EQUALVERIFY :: OP_CHECKSIG :: Nil if data.size == 20 => Script.pay2wpkh(data)
+      case _ => Script.pay2wsh(redeemScript)
+    }
+  }
+
+  case class TaprootScriptPath(internalKey: XonlyPublicKey, scriptTree: ScriptTree, leafHash: ByteVector32) extends TaprootScriptPathOrSegwitV0 {
+
+    import fr.acinq.bitcoin.scalacompat.KotlinUtils._
+
+    val leaf: ScriptTree.Leaf = Option(scriptTree.findScript(leafHash)).getOrElse(throw new IllegalArgumentException(s"leaf $leafHash not found in script tree"))
+
+    override def publicKeyScript: Seq[ScriptElt] = Script.pay2tr(internalKey, Some(scriptTree))
+  }
+
+  case class TaprootKeyPath(internalKey: XonlyPublicKey, scriptTree_opt: Option[ScriptTree]) extends TaprootKeyPathOrSegwitV0 {
+    override def publicKeyScript: Seq[ScriptElt] = Script.pay2tr(internalKey, scriptTree_opt)
+  }
+}
+
 sealed trait CommitmentOutput {
   val amount: Satoshi
-  val redeemScript: Seq[ScriptElt]
-  val publicKeyScript: Seq[ScriptElt] = redeemScript match {
-    case OP_DUP :: OP_HASH160 :: OP_PUSHDATA(data, _) :: OP_EQUALVERIFY :: OP_CHECKSIG :: Nil if data.size == 20 => Script.pay2wpkh(data)
-    case _ => Script.pay2wsh(redeemScript)
-  }
-  val txOut: TxOut = TxOut(amount, publicKeyScript)
+  val redeemInfo: RedeemInfo
+  val txOut: TxOut = TxOut(amount, redeemInfo.publicKeyScript)
 }
 
 object CommitmentOutput {
   // @formatter:off
-  case class ToLocal(override val amount: Satoshi, redeemScript: Seq[ScriptElt]) extends CommitmentOutput
-  case class ToRemote(override val amount: Satoshi, redeemScript: Seq[ScriptElt]) extends CommitmentOutput
-  case class ToLocalAnchor(override val amount: Satoshi, redeemScript: Seq[ScriptElt]) extends CommitmentOutput
-  case class ToRemoteAnchor(override val amount: Satoshi, redeemScript: Seq[ScriptElt]) extends CommitmentOutput
-  case class HtlcSuccessOutput(txOut: TxOut, redeemScript: Seq[ScriptElt])
-  case class InHtlc(override val amount: Satoshi, incomingHtlc: IncomingHtlc, redeemScript: Seq[ScriptElt], htlcSuccessOutput: Option[HtlcSuccessOutput]) extends CommitmentOutput
-  case class HtlcTimeoutOutput(txOut: TxOut, redeemScript: Seq[ScriptElt])
-  case class OutHtlc(override val amount: Satoshi, outgoingHtlc: OutgoingHtlc, redeemScript: Seq[ScriptElt], htlcTimeoutOutput: Option[HtlcTimeoutOutput]) extends CommitmentOutput
+  case class ToLocal(amount: Satoshi, redeemInfo: RedeemInfo) extends CommitmentOutput
+  case class ToRemote(amount: Satoshi, redeemInfo: RedeemInfo) extends CommitmentOutput
+  case class ToLocalAnchor(amount: Satoshi, redeemInfo: RedeemInfo) extends CommitmentOutput
+  case class ToRemoteAnchor(amount: Satoshi, redeemInfo: RedeemInfo) extends CommitmentOutput
+  case class HtlcSuccessOutput(amount: Satoshi, redeemInfo: RedeemInfo) {
+    val txOut: TxOut = TxOut(amount, redeemInfo.publicKeyScript)
+  }
+  case class InHtlcWithoutHtlcSuccess(amount: Satoshi, incomingHtlc: IncomingHtlc, redeemInfo: RedeemInfo) extends CommitmentOutput
+  case class InHtlc(amount: Satoshi, incomingHtlc: IncomingHtlc, redeemInfo: RedeemInfo, htlcSuccessOutput: HtlcSuccessOutput) extends CommitmentOutput
+  case class HtlcTimeoutOutput(amount: Satoshi, redeemInfo: RedeemInfo) {
+    val txOut: TxOut = TxOut(amount, redeemInfo.publicKeyScript)
+  }
+  case class OutHtlcWithoutHtlcTimeout(amount: Satoshi, outgoingHtlc: OutgoingHtlc, redeemInfo: RedeemInfo) extends CommitmentOutput
+  case class OutHtlc(amount: Satoshi, outgoingHtlc: OutgoingHtlc, redeemInfo: RedeemInfo, htlcTimeoutOutput: HtlcTimeoutOutput) extends CommitmentOutput
   // @formatter:on
 
   def isLessThan(a: CommitmentOutput, b: CommitmentOutput): Boolean = (a, b) match {
